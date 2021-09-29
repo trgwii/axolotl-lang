@@ -13,21 +13,21 @@ import {
 const toString = (x: Uint8Array) => new TextDecoder().decode(x);
 const toBuf = (s: string) => new TextEncoder().encode(s);
 
-const fd = open("file.txt", [Open.write, Open.create]);
+const fd = await open("file.txt", [Open.write, Open.create]);
 
 await write(fd, toBuf("hello"));
 
-close(fd);
+await close(fd);
 
-const fd2 = open("file.txt", [Open.read]);
+const fd2 = await open("file.txt", [Open.read]);
 
 console.log(toString(await read(fd2)));
 
-close(fd2);
+await close(fd2);
 
-unlink("file.txt");
+await unlink("file.txt");
 
-const server = listen(":8090");
+const server = await listen(":8090");
 
 (async () => {
   let conn = 0;
@@ -44,7 +44,7 @@ const server = listen(":8090");
       ),
     );
 
-    close(conn);
+    await close(conn);
   }
 })();
 
@@ -57,4 +57,4 @@ await write(
 
 console.log(toString(await read(conn)));
 
-close(conn);
+await close(conn);

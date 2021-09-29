@@ -19,9 +19,8 @@ export enum Open {
   createNew = 5,
 }
 
-// (def open_async 0)
 // (defun (open: int) [(path: string) (opts: int[])])
-export const open = (path: string, opts?: Open[]): number => {
+export const open = (path: string, opts?: Open[]): Promise<number> => {
   const _opts: Deno.OpenOptions = {
     read: opts ? opts.includes(Open.read) : true,
     write: opts ? opts.includes(Open.write) : false,
@@ -31,32 +30,31 @@ export const open = (path: string, opts?: Open[]): number => {
   };
   const fd = Deno.openSync(path, _opts).rid; // TODO: handle errors
   files.set(fd, new Uint8Array(1024 * 32));
-  return fd;
+  return Promise.resolve(fd);
 };
 
-// (def close_async 0)
 // (defun (close: nil) [(fd: int)])
-export const close = (fd: number): void => {
+export const close = (fd: number): Promise<void> => {
   if (files.has(fd)) {
     files.delete(fd);
     new Deno.File(fd).close();
-    return;
+    return Promise.resolve();
   }
   if (listeners.has(fd)) {
     const listener = listeners.get(fd)!;
     listeners.delete(fd);
     listener.server.close();
-    return;
+    return Promise.resolve();
   }
   if (connections.has(fd)) {
     const { conn } = connections.get(fd)!;
     connections.delete(fd);
     conn.close();
-    return;
+    return Promise.resolve();
   }
+  return Promise.resolve(); // TODO: handle errors
 };
 
-// (def read_async 1)
 // (defun (read: int[]) [(fd: int)])
 export const read = async (fd: number): Promise<Uint8Array> => {
   if (files.has(fd)) {
@@ -87,7 +85,6 @@ export const read = async (fd: number): Promise<Uint8Array> => {
   return empty;
 };
 
-// (def write_async 1)
 // (defun (write: nil) [(fd: int) (data: int[])])
 export const write = async (fd: number, data: Uint8Array): Promise<void> => {
   if (files.has(fd)) {
@@ -106,18 +103,16 @@ export const write = async (fd: number, data: Uint8Array): Promise<void> => {
   }
 };
 
-// (def unlink_async 0)
 // (defun (unlink: nil) [(path: string)])
-export const unlink = (path: string): void => {
-  Deno.removeSync(path); // TODO: handle errors
+export const unlink = async (path: string): Promise<void> => {
+  await Deno.remove(path); // TODO: handle errors
 };
 
-// (def listen_async 0)
 // (defun (listen: int) [(address: string)])
-export const listen = (address: string): number => {
+export const listen = (address: string): Promise<number> => {
   const [h, p] = address.split(":");
   if (!p) {
-    return -1; // TODO: handle errors
+    return Promise.resolve(-1); // TODO: handle errors
   }
   const host = h || "0.0.0.0";
   const port = Number(p);
@@ -126,10 +121,9 @@ export const listen = (address: string): number => {
     server: listener,
     buf: new Uint8Array(1024 * 32),
   });
-  return listener.rid;
+  return Promise.resolve(listener.rid);
 };
 
-// (def accept_async 1)
 // (defun (accept: int) [(listener: int)])
 export const accept = async (listener: number): Promise<number> => {
   const _listener = listeners.get(listener);
@@ -145,7 +139,6 @@ export const accept = async (listener: number): Promise<number> => {
   }
 };
 
-// (def connect_async 1)
 // (defun (connect: int) [(address: string)])
 export const connect = async (address: string): Promise<number> => {
   const [h, p] = address.split(":");
