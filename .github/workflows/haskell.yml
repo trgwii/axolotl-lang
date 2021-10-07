@@ -13,7 +13,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macOS-latest, windows-latest]
         cabal: ["3.4.0.0"]
-        ghc: ["8.10.5"]
+        ghc: ["9.0.1"]
 
     steps:
     - uses: actions/checkout@v2
@@ -47,7 +47,7 @@ jobs:
       working-directory: ${{ github.workspace }}
 
     - name: Copy executable
-      run: cp dist-newstyle/build/x86_64-*/ghc-*/axolotl-*/x/axl/opt/build/axl/axl$(if [ "$RUNNER_OS" == "Windows" ]; then echo ".exe"; else echo ""; fi) axl
+      run: cp dist-newstyle/build/x86_64-*/ghc-*/axolotl-$(cat axolotl.cabal | grep '^version' | awk '{print $2}')/x/axl/opt/build/axl/axl$(if [ "$RUNNER_OS" == "Windows" ]; then echo ".exe"; else echo ""; fi) axl
       shell: bash
       working-directory: ${{ github.workspace }}
 

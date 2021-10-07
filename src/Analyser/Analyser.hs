@@ -1,11 +1,11 @@
 module Analyser.Analyser where
 
-import Analyser.Analysers.ArbitraryBlock
-import Analyser.Analysers.Array
-import Analyser.Analysers.Conditional
-import Analyser.Analysers.FunctionCall
-import Analyser.Analysers.FunctionDef
-import Analyser.Analysers.VariableDef
+import Analyser.Analysers.ArbitraryBlock (analyseArbitraryBlock)
+import Analyser.Analysers.Array (analyseArray)
+import Analyser.Analysers.Conditional (analyseConditional)
+import Analyser.Analysers.FunctionCall (analyseFunctionCall)
+import Analyser.Analysers.FunctionDef (analyseFunctionDef)
+import Analyser.Analysers.VariableDef (analyseVariableDef)
 import Analyser.Util
   ( AnalyserResult,
     Def (Argument, Function, IncompleteFunction, Variable),
@@ -17,19 +17,15 @@ import Analyser.Util
     isFnCall,
     makeLeft,
     rFoldl,
-    tfst,
-    tsnd,
-    tthd,
   )
 import Control.Monad.State
-  ( MonadState (get, put),
-    State,
-    modify,
-    runState,
+  ( MonadIO (liftIO),
+    MonadState (get),
+    StateT (runStateT),
   )
 import Data.Bifunctor (first, second)
 import Data.Either.Combinators (fromLeft', fromRight, fromRight', isLeft, maybeToRight)
-import Data.HashMap.Strict as H (HashMap, delete, empty, findWithDefault, fromList, insert, lookup, union)
+import qualified Data.HashTable.IO as H
 import Data.Maybe (fromJust, fromMaybe, isJust)
 import Data.Text as T (Text, empty, pack, toLower, unpack)
 import Debug.Trace (trace)
@@ -42,8 +38,8 @@ import Parser.Ast
   analyseExprs should be used to fold over a list of expressions,
   with the final result being (globalDefs, localDefs, inferredTree)
 
-  globalDefs here is a hashmap - (DefName, Expr), simple enough
-  localDefs is a hashmap - (scopeName, hashmap (DefName, Expr))
+  globalDefs here is a hashtable - (DefName, Expr), simple enough
+  localDefs is a hashtable - (scopeName, hashtable (DefName, Expr))
 
   so if you have two functions called a and b, and you defined a
   variable age=20 in a and name="udit" in b, you'll have localDefs as
@@ -53,63 +49,70 @@ import Parser.Ast
   ]
 
   inferredTree is the expr array you passed it with all Inferred
-  in it's tree replaced with actual types inferred from context
+  in it's tree replaced with actual types inferred from context.
 
-  analyseExprs calls replaceInferredVdt for every expr in the expr array you give it
-  initially, which in turn in most cases calls getTypeOfExpr
+  analyseExprs calls replaceInferredVdt for every expr in the
+  expr array you give it initially, which in turn calls
+  getTypeOfExpr in case of FunctionCall and VariableDef.
 
   I use analyseExprs for AST Root (just array of all expr in program)
   and function bodies here, but it can be used anywhere you want to
-  infer types and analyse a set of expressions
+  infer types and analyse a set of expressions.
 -}
 
-{-
-  Cases where a type-check is necessary:
-  * variable definition when the type is explicitly defined
-  * function definition when the return type is explicitly defined
-  * function call (whether all arguments confirm to needed types)
-  * array generation (whether all arguments confirm to needed type)
-
-  note that if the type of an array is explicitly defined, every
-  element in the array must have the same type, and in case the
-  type is _not_ explicitly defined, every element in the array
-  must have the same type as the first element in the array
--}
-
-analyseExprs :: (State Env AnalyserResult -> Expr -> State Env AnalyserResult)
+analyseExprs :: (StateT Env IO AnalyserResult -> Expr -> StateT Env IO AnalyserResult)
 analyseExprs acc' curr = do
   env <- get
   acc <- acc'
-  if not (null acc) && isLeft (last acc)
-    then put (H.empty, H.empty) >> pure [last acc]
-    else case replaceInferredVdt curr (fst env) of
-      Left err -> pure $ acc <> [Left err]
-      Right infExpr -> case infExpr of
-        Array exprs -> analyseArray acc exprs infExpr
-        FunctionCall name args -> analyseFunctionCall acc infExpr name args
-        VariableDef name vtype expr -> analyseVariableDef acc infExpr name vtype expr
-        Conditional cond ift iff -> analyseConditional acc cond ift iff
-        ArbitraryBlock body -> analyseArbitraryBlock acc body analyseExprs
-        FunctionDef name vtype args body frgn -> analyseFunctionDef acc analyseExprs name vtype args body frgn
-        _ -> pure $ acc <> [Right infExpr]
+  -- infer types, replacing all Inferred in the AST with actual types
+  v <- liftIO $ replaceInferredVdt curr (fst env)
+  case v of
+    Left err -> pure $ acc <> [Left err]
+    Right infExpr -> case infExpr of
+      -- exprs :: [Expr]  -> the list of Exprs that an array is formed by
+      Array exprs -> analyseArray acc exprs infExpr
+      -- name  :: Text    -> the function that is being called
+      -- args  :: [Expr]  -> the arguments passed to the function
+      FunctionCall name args -> analyseFunctionCall acc infExpr name args
+      -- name  :: Text      -> the name of the variable
+      -- vtype :: VDataType -> data type of the variable
+      -- expr  :: Expr      -> value contained in the variable
+      VariableDef name vtype expr -> analyseVariableDef acc infExpr name vtype expr
+      -- cond  :: Expr -> the condition to evaluate, must return bool
+      -- ift   :: Expr -> the Expr to return if cond is **true**
+      -- iff   :: Expr -> the Expr to return if cond is **false**
+      Conditional cond ift iff -> analyseConditional acc cond ift iff
+      -- body  :: [Expr] -> the set of exprs that the block is formed by
+      ArbitraryBlock body -> analyseArbitraryBlock acc body analyseExprs
+      -- name   :: Text                -> the name of the function
+      -- vtype  :: VDataType           -> data type of the return value of the function
+      -- args   :: [(Text, VDataType)] -> the arguments expected to be passed to the function
+      -- body   :: [Expr]              -> the Exprs that make up the function body; last expr is returned
+      -- native :: Bool                -> whether the function is a native function
+      FunctionDef name vtype args body native -> analyseFunctionDef acc analyseExprs name vtype args body native
+      _ -> pure $ acc <> [Right infExpr]
 
-replaceInferredVdt :: Expr -> GDefs -> Either Text Expr
+replaceInferredVdt :: Expr -> GDefs -> IO (Either Text Expr)
 replaceInferredVdt (Root x) gd = error "fold with analyseExprs for this"
 -- handle variable definition inside variable definition
 replaceInferredVdt (VariableDef name x VariableDef {}) _ =
-  Left "Cannot define a variable inside a variable"
+  pure $ Left "Cannot define a variable inside a variable"
 -- infer types for proper variable definitions
-replaceInferredVdt (VariableDef name Inferred y) gd =
-  getTypeOfExpr y gd >>= \t -> Right $ VariableDef name t y
+replaceInferredVdt (VariableDef name Inferred y) gd = do
+  t' <- getTypeOfExpr y gd
+  case t' of
+    Left txt -> pure $ Left txt
+    Right t -> pure $ Right $ VariableDef name t y
 -- infer function call types
 replaceInferredVdt (FunctionCall name args) gd =
   getTypeOfExpr (FunctionCall name args) gd >>= \t ->
-    Right $ FunctionCall name args
+    pure $ Right $ FunctionCall name args
 -- send back nodes that don't need type inference
-replaceInferredVdt x _ = Right x
+replaceInferredVdt x _ = pure $ Right x
 
-analyseAst :: Expr -> GDefs -> (Either Text Expr, GDefs, LDefs)
+analyseAst :: Expr -> GDefs -> IO (Either Text Expr, (GDefs, LDefs))
 analyseAst (Root x) gd = do
-  let t = runState (foldl analyseExprs (pure []) x) (gd, H.empty)
-  (sequence (fst t) >>= \v -> Right (Root v), (fst . snd) t, (snd . snd) t)
+  h <- H.newSized 1000
+  t <- runStateT (foldl analyseExprs (pure []) x) (gd, h)
+  pure (sequence (fst t) >>= \v -> Right (Root v), snd t)
 analyseAst _ _ = undefined
